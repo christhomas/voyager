@@ -1,3 +1,19 @@
+# make build-local //build for local go env configs
+# make build-local GOOS= GOARCH= GOARM= //override default values
+# make build-docker //build inside docker, for local go env configs
+# make build-docker GOOS= GOARCH= GOARM= //build inside docker, override local configs
+# make build-local-all //build locally for all platform
+# make build-docker-all //build inside docker, for all platform
+# make docker-build //build docker image for local go env configs
+# make docker-build GOOS= GOARCH= GOARM= IMAGE_NAME=(voyager if unspecified) IMAGE_TYPE=(debug if unspecified)
+# make docker-build-all
+# make docker-push
+# make docker-push GOOS= GOARCH= GOARM=
+# make docker-push-all
+# make docker-release
+# make docker-release GOOS= GOARCH= GOARM=
+# make docker-release-all
+
 SHELL := /bin/bash
 BIN := voyager
 haproxy_version ?= 1.8.12
@@ -5,11 +21,16 @@ CGO_ENV ?= CGO_ENABLED=0
 PKG := github.com/appscode/$(BIN)
 DOCKER_REGISTRY ?= tahsin
 UID := $(shell id -u $$USER)
+
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
 GOARM ?= $(shell go env GOARM)
-BUILD_ENV := local
-ALL_OS := linux windows darwin arm64 arm7 arm6
+
+IMAGE_NAME ?= $(BIN)
+IMAGE_TYPE ?= debug
+
+platforms := linux/amd64 linux/arm64 linux/arm/7 linux/arm/6 windows/amd64 darwin/amd64
+docker_image_names := voyager haproxy
 
 # metadata
 commit_hash := $(shell git rev-parse --verify HEAD)
@@ -55,168 +76,91 @@ install:
 	go install ./...
 
 build-local: build-prerequisite
-	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) $(CGO_ENV) go build -o dist/$(BIN)/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM)$(ext) $(CGO) $(ldflags) *.go
+	@cowsay -f tux building binary $(BIN)-$(GOOS)-$(GOARCH)$(GOARM)
+	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) $(CGO_ENV) \
+		 go build -o dist/$(BIN)/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM) $(CGO) $(ldflags) *.go
 
 build-docker: build-prerequisite
+	@cowsay -f tux building binary $(BIN)-$(GOOS)-$(GOARCH)$(GOARM) inside docker
 	docker run --rm -u $(UID) -v /tmp:/.cache -v $$(pwd):/go/src/$(PKG) -w /go/src/$(PKG) \
 		-e $(CGO_ENV) golang:1.9-alpine env GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) \
 		go build -o dist/$(BIN)/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM)$(ext) $(CGO) $(ldflags) *.go
 
-build-local-%:
-	@if [ -z $(findstring arm,$*) ]; then\
-		echo building $(BIN)-$*-amd64;\
-		$(MAKE) --no-print-directory GOOS=$* GOARCH=amd64 build-local;\
+build-%-all:
+	@for platform in $(platforms); do \
+		IFS='/' read -r -a array <<< $$platform; \
+		GOOS=$${array[0]}; GOARCH=$${array[1]}; GOARM=$${array[2]}; \
+		$(MAKE) --no-print-directory GOOS=$$GOOS GOARCH=$$GOARCH GOARM=$$GOARM build-$*; \
+	done
+
+haproxy_dockerfile_dir=hack/docker/haproxy/$(haproxy_version)-alpine
+haproxy_image_tag=$(haproxy_version)-$(version)-alpine
+voyager_dockerfile_dir=hack/docker/voyager
+voyager_image_tag=$(version)
+
+docker-build:
+	@cowsay -f tux building $(DOCKER_REGISTRY)/$(IMAGE_NAME):$($(IMAGE_NAME)_image_tag)-$(GOOS)-$(GOARCH)$(GOARM)-$(IMAGE_TYPE)
+	cp $($(IMAGE_NAME)_dockerfile_dir)/Dockerfile Dockerfile.tmp
+	if [ $(IMAGE_TYPE) = debug ]; then \
+		echo 'USER nobody:nobody' >> Dockerfile.tmp; \
 	else \
-		echo building $(BIN)-linux-$*;\
-		if [ $* = arm64 ]; then \
-			$(MAKE) --no-print-directory GOOS=linux GOARCH=arm64 build-local;\
-		elif [ $* = arm7 ]; then \
-			$(MAKE) --no-print-directory GOOS=linux GOARCH=arm GOARM=7 build-local;\
-		else \
-			$(MAKE) --no-print-directory GOOS=linux GOARCH=arm GOARM=6 build-local;\
-		fi;\
+		echo 'USER root:root' >> hack/docker/$(IMAGE_NAME)/Dockerfile.tmp; \
 	fi
 
-build-docker-%:
-	@if [ -z $(findstring arm,$*) ]; then\
-		echo building $(BIN)-$*-amd64;\
-		$(MAKE) --no-print-directory GOOS=$* GOARCH=amd64 build-docker;\
-	else \
-		echo building $(BIN)-linux-$*;\
-		if [ $* = arm64 ]; then \
-			$(MAKE) --no-print-directory GOOS=linux GOARCH=arm64 build-docker;\
-		elif [ $* = arm7 ]; then \
-			$(MAKE) --no-print-directory GOOS=linux GOARCH=arm GOARM=7 build-docker;\
-		else \
-			$(MAKE) --no-print-directory GOOS=linux GOARCH=arm GOARM=6 build-docker;\
-		fi;\
-	fi
-
-
-build-all-local: $(addprefix build-local-,$(ALL_OS))
-build-all-docker: $(addprefix build-docker-,$(ALL_OS))
-
-#docker-%-haproxy: dockerfile_dir=hack/docker/haproxy/$(haproxy_version)-alpine
-#docker-%-haproxy: image_name=haproxy
-#docker-%-haproxy: image_tag=$(haproxy_version)-$(version)-alpine
-#docker-%-voyager: dockerfile_dir=hack/docker/voyager
-#docker-%-voyager: image_name=voyager
-#docker-%-voyager: image_tag=$(version)
-
-voyager_dockerfile_dir := hack/docker/voyager
-voyager_image_tag := $(version)
-
-haproxy_dockerfile_dir := hack/docker/haproxy/$(haproxy_version)-alpine
-haproxy_image_tag := $(haproxy_version)-$(version)-alpine
-
-docker-build-%-debug:
-	@$(MAKE) --no-print-directory image_name=$* image_tag=$($*_image_tag)-debug \
-		dockerfile_dir=$($*_dockerfile_dir) image_type=debug docker_build_image
-docker-build-%-prod:
-	@$(MAKE) --no-print-directory image_name=$* image_tag=$($*_image_tag) \
-		dockerfile_dir=$($*_dockerfile_dir) image_type=prod docker_build_image
-
-docker-build-voyager: docker-build-voyager-debug docker-build-voyager-prod
-docker-build-haproxy: docker-build-haproxy-debug docker-build-haproxy-prod
-docker-build: docker-build-voyager docker-build-haproxy
-
-docker_build_image: #build-docker-linux
 	docker build \
 		--build-arg CGO_ENV="$(CGO_ENV)" \
 		--build-arg CGO="$(CGO)" \
-		--build-arg GitTag="$(git_tag)" \
-		--build-arg CommitHash="$(commit_hash)" \
-		--build-arg CommitTimestamp="$(commit_timestamp)" \
-		--build-arg VersionStrategy="$(version_strategy)" \
-		--build-arg Version="$(version)" \
-		--build-arg GitBranch="$(git_branch)" \
-		--build-arg BuildHost="$(build_host)" \
-		--build-arg BuildHostOS="$(build_host_os)" \
-		--build-arg BuildHostArch="$(build_host_arch)" \
-		--build-arg BuildTimestamp="$(build_timestamp)" \
-		-t $(DOCKER_REGISTRY)/$(image_name):$(image_tag) .
+		--build-arg linker_opts="$(linker_opts)" \
+		--build-arg GOARCH="$(GOARCH)" \
+		--build-arg GOARM="$(GOARM)" \
+		-t $(DOCKER_REGISTRY)/$(IMAGE_NAME):$($(IMAGE_NAME)_image_tag)-$(GOOS)-$(GOARCH)$(GOARM)-$(IMAGE_TYPE) -f Dockerfile.tmp .
 
-#	cp dist/$(BIN)/$(BIN)-linux-amd64 $(dockerfile_dir)/$(BIN); \
-#	cd $(dockerfile_dir); \
-#	chmod 755 $(BIN); \
-#	curl -fsSL -o auth-request.lua https://raw.githubusercontent.com/appscode/haproxy-auth-request/v1.8.12/auth-request.lua; \
-#	docker build -t $(DOCKER_REGISTRY)/$(image_name):$(image_tag) -f Dockerfile-$(image_type) .; \
-#	rm voyager auth-request.lua;
+	@+rm Dockerfile.tmp
 
+docker-push: docker-build
+	@cowsay -f tux pushing $(DOCKER_REGISTRY)/$(IMAGE_NAME):$($(IMAGE_NAME)_image_tag)-$(GOOS)-$(GOARCH)$(GOARM)-$(IMAGE_TYPE)
+	@if [ "$$APPSCODE_ENV" = "prod" ]; then\
+		echo "Nothing to do in prod env. Are you trying to 'release' binaries to prod?";\
+		exit 1;\
+	fi
+	@if [ "$(version_strategy)" = "git_tag" ]; then\
+		echo "Are you trying to 'release' binaries to prod?";\
+		exit 1;\
+	fi
 
-###docker-build-%: #build-docker-linux
-###	cp dist/$(BIN)/$(BIN)-linux-amd64 $(dockerfile_dir)/$(BIN); \
-###	cd $(dockerfile_dir); \
-###	chmod 755 $(BIN); \
-###	curl -fsSL -o auth-request.lua https://raw.githubusercontent.com/appscode/haproxy-auth-request/v1.8.12/auth-request.lua; \
-###	docker build -t $(DOCKER_REGISTRY)/$(image_name):$(image_tag) . ; \
-###	rm voyager auth-request.lua;
-###
-###docker-push-%: docker-build-%
-###	@if [ "$$APPSCODE_ENV" = "prod" ]; then\
-###		echo "Nothing to do in prod env. Are you trying to 'release' binaries to prod?";\
-###		exit 1;\
-###	fi
-###	@if [ "$(version_strategy)" = "git_tag" ]; then\
-###		echo "Are you trying to 'release' binaries to prod?";\
-###		exit 1;\
-###	fi
-###
-###	docker push $(DOCKER_REGISTRY)/$(image_name):$(image_tag)
-###
-###	@if [[ "$(version_strategy)" == "commit_hash" && "$(git_branch)" == "master" ]]; then\
-###		set -x;\
-###		docker tag $(DOCKER_REGISTRY)/$(image_name):$(image_tag) $(DOCKER_REGISTRY)/$(image_name):canary ;\
-###		docker push $(DOCKER_REGISTRY)/$(image_name):canary ;\
-###	fi
-###
-###docker-build: docker-build-voyager docker-build-haproxy
-###docker-push: docker-push-voyager docker-push-haproxy
+	docker push $(DOCKER_REGISTRY)/$(IMAGE_NAME):$($(IMAGE_NAME)_image_tag)-$(GOOS)-$(GOARCH)$(GOARM)-$(IMAGE_TYPE)
 
-#docker-release: docker-build
-#	@if [ "$$APPSCODE_ENV" != "prod" ]; then\
-#		echo "'release' only works in PROD env.";\
-#		exit 1;\
-#	fi
-#
-#	@if [ "$(version_strategy)" != "git_tag" ]; then\
-#		echo "'apply_tag' to release binaries and/or docker images.";\
-#		exit 1;\
-#	fi
-#
-#	docker push $(DOCKER_REGISTRY):$(BIN):$(version)
+	@if [[ "$(version_strategy)" == "commit_hash" && "$(git_branch)" == "master" ]]; then\
+		set -x;\
+		docker tag $(DOCKER_REGISTRY)/$(image_name):$(image_tag) $(DOCKER_REGISTRY)/$(image_name):canary ;\
+		docker push $(DOCKER_REGISTRY)/$(image_name):canary ;\
+	fi
 
-#build-all-arm: build-arm64-docker build-arm-docker
-#
-#build-local-%:
-#	@$(MAKE) --no-print-directory GOOS=$* GOARCH=amd64 build-local
-#
-#build-docker-%:
-#	@$(MAKE) --no-print-directory GOOS=$* GOARCH=amd64 build-docker
-#
-#build-local-arm64:
-#	@$(MAKE) --no-print-directory GOOS=linux GOARCH=arm64 build-local
-#
-#build-local-arm7:
-#	@$(MAKE) --no-print-directory GOOS=linux GOARCH=arm GOARM=7 build-local
-#
-#build-local-arm6:
-#	@$(MAKE) --no-print-directory GOOS=linux GOARCH=arm GOARM=6 build-local
-#
-#build-docker-arm64:
-#	@$(MAKE) --no-print-directory GOOS=linux GOARCH=arm64 build-docker
-#
-#build-docker-arm7:
-#	@$(MAKE) --no-print-directory GOOS=linux GOARCH=arm GOARM=7 build-docker
-#
-#build-docker-arm6:
-#	@$(MAKE) --no-print-directory GOOS=linux GOARCH=arm GOARM=6 build-docker
-#
-#build-arm64-%:
-#	@$(MAKE) --no-print-directory GOOS=linux GOARCH=arm64 build-$*
-#
-#build-arm-%:
-#	@$(MAKE) --no-print-directory GOOS=linux GOARCH=arm build-$*
+docker-release: docker-build
+	@if [ "$$APPSCODE_ENV" != "prod" ]; then\
+		echo "'release' only works in PROD env.";\
+		exit 1;\
+	fi
+
+	@if [ "$(version_strategy)" != "git_tag" ]; then\
+		echo "'apply_tag' to release binaries and/or docker images.";\
+		exit 1;\
+	fi
+
+	docker push $(DOCKER_REGISTRY)/$(IMAGE_NAME):$($(IMAGE_NAME)_image_tag)-$(GOOS)-$(GOARCH)$(GOARM)-$(IMAGE_TYPE)
+
+docker-%-all:
+	@for platform in $(platforms); do \
+		IFS='/' read -r -a array <<< $$platform; \
+		GOOS=$${array[0]}; GOARCH=$${array[1]}; GOARM=$${array[2]}; \
+		for image_name in $(docker_image_names); do \
+			for image_type in debug prod; do \
+				$(MAKE) --no-print-directory \
+				GOOS=$$GOOS GOARCH=$$GOARCH GOARM=$$GOARM IMAGE_NAME=$$image_name IMAGE_TYPE=$$image_type docker-$*; \
+			done; \
+		done; \
+	done
+
 
 build-prerequisite: gen fmt
 	mkdir -p dist/$(BIN)
@@ -226,9 +170,6 @@ gen:
 fmt:
 	gofmt -s -w *.go apis client pkg test third_party
 	goimports -w *.go apis client pkg test third_party
-
-build/$(GOOS)/$(GOARCH)/$(GOARM):
-	echo "here"
 
 # check if metadata is set correctly
 metadata:
