@@ -161,6 +161,11 @@ docker-%-all:
 		done; \
 	done
 
+deb:
+	sed -i 's/version: version/version: $(version)/' nfpm.yaml
+	nfpm pkg --target dist/voyager/voyager.deb
+	sed -i 's/version: $(version)/version: version/' nfpm.yaml
+
 
 build-prerequisite: gen fmt
 	mkdir -p dist/$(BIN)
