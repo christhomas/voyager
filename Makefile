@@ -2,8 +2,8 @@
 # make build-local GOOS= GOARCH= GOARM= //override default values
 # make build-docker //build inside docker, for local go env configs
 # make build-docker GOOS= GOARCH= GOARM= //build inside docker, override local configs
-# make build-local-all //build locally for all platform
-# make build-docker-all //build inside docker, for all platform
+# make all-build-local //build locally for all platform
+# make all-build-docker //build inside docker, for all platform
 # make docker-build //build docker image for local go env configs
 # make docker-build GOOS= GOARCH= GOARM= IMAGE_NAME=(voyager if unspecified) IMAGE_TYPE=(debug if unspecified)
 # make docker-build-all
@@ -13,6 +13,9 @@
 # make docker-release
 # make docker-release GOOS= GOARCH= GOARM=
 # make docker-release-all
+# make package-deb //you can also specify GOOS GOARCH GOARM values
+# make package-rpm //same as above
+# make all-package //for linux amd64 and arm, both deb and rpm packages
 
 SHELL := /bin/bash
 BIN := voyager
@@ -74,24 +77,6 @@ build: build-prerequisite
 
 install:
 	go install ./...
-
-build-local: build-prerequisite
-	@cowsay -f tux building binary $(BIN)-$(GOOS)-$(GOARCH)$(GOARM)
-	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) $(CGO_ENV) \
-		 go build -o dist/$(BIN)/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM) $(CGO) $(ldflags) *.go
-
-build-docker: build-prerequisite
-	@cowsay -f tux building binary $(BIN)-$(GOOS)-$(GOARCH)$(GOARM) inside docker
-	docker run --rm -u $(UID) -v /tmp:/.cache -v $$(pwd):/go/src/$(PKG) -w /go/src/$(PKG) \
-		-e $(CGO_ENV) golang:1.9-alpine env GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) \
-		go build -o dist/$(BIN)/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM)$(ext) $(CGO) $(ldflags) *.go
-
-build-%-all:
-	@for platform in $(platforms); do \
-		IFS='/' read -r -a array <<< $$platform; \
-		GOOS=$${array[0]}; GOARCH=$${array[1]}; GOARM=$${array[2]}; \
-		$(MAKE) --no-print-directory GOOS=$$GOOS GOARCH=$$GOARCH GOARM=$$GOARM build-$*; \
-	done
 
 haproxy_dockerfile_dir=hack/docker/haproxy/$(haproxy_version)-alpine
 haproxy_image_tag=$(haproxy_version)-$(version)-alpine
@@ -161,14 +146,21 @@ docker-%-all:
 		done; \
 	done
 
-deb:
-	sed -i 's/version: version/version: $(version)/' nfpm.yaml
-	nfpm pkg --target dist/voyager/voyager.deb
-	sed -i 's/version: $(version)/version: version/' nfpm.yaml
+package-%:
+	@mkdir -p dist/$(BIN)/package
+	$(MAKE) --no-print-directory dist/$(BIN)/package/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM).$*
+
+linux_package_platforms := linux/amd64 linux/arm64 linux/arm/7 linux/arm/6
+all-package:
+	@for platform in $(linux_package_platforms); do \
+		IFS='/' read -r -a array <<< $$platform; \
+		GOOS=$${array[0]}; GOARCH=$${array[1]}; GOARM=$${array[2]}; \
+		$(MAKE) --no-print-directory GOOS=$$GOOS GOARCH=$$GOARCH GOARM=$$GOARM package-deb; \
+		$(MAKE) --no-print-directory GOOS=$$GOOS GOARCH=$$GOARCH GOARM=$$GOARM package-rpm; \
+	done
 
 
-build-prerequisite: gen fmt
-	mkdir -p dist/$(BIN)
+rpm-all:
 
 gen:
 
@@ -182,3 +174,37 @@ metadata:
 	@echo version strategy $(version_strategy)
 	@echo version $(version)
 	@echo git branch $(git_branch)
+
+SOURCES := $(shell find . -name "*.go")
+build-%: gen fmt
+	@$(MAKE) --no-print-directory dist/$(BIN)/$*/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM)
+
+all-build-%:
+	@for platform in $(platforms); do \
+		IFS='/' read -r -a array <<< $$platform; \
+		GOOS=$${array[0]}; GOARCH=$${array[1]}; GOARM=$${array[2]}; \
+		$(MAKE) --no-print-directory GOOS=$$GOOS GOARCH=$$GOARCH GOARM=$$GOARM build-$*; \
+	done
+
+
+dist/$(BIN)/local/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM): $(SOURCES)
+	@cowsay -f tux building binary $(BIN)-$(GOOS)-$(GOARCH)$(GOARM)
+	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) $(CGO_ENV) \
+		 go build -o dist/$(BIN)/local/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM) $(CGO) $(ldflags) *.go
+
+dist/$(BIN)/docker/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM): $(SOURCES)
+	@cowsay -f tux building binary $(BIN)-$(GOOS)-$(GOARCH)$(GOARM) inside docker
+	docker run --rm -u $(UID) -v /tmp:/.cache -v $$(pwd):/go/src/$(PKG) -w /go/src/$(PKG) \
+		-e $(CGO_ENV) golang:1.9-alpine env GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) \
+		go build -o dist/$(BIN)/docker/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM) $(CGO) $(ldflags) *.go
+
+dist/$(BIN)/package/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM).%:
+	@cowsay -f tux creating package $(BIN)-$(GOOS)-$(GOARCH)$(GOARM).$*
+	@cp nfpm.yaml /tmp/nfpm.yml.tmp
+	@sed -i 's/amd64/$(GOARCH)$(GOARM)/' /tmp/nfpm.yml.tmp
+	@sed -i 's/linux/$(GOOS)/' /tmp/nfpm.yml.tmp
+	@sed -i '4s/1.0.0/$(version)/' /tmp/nfpm.yml.tmp
+	nfpm pkg --target dist/$(BIN)/package/$(BIN)-$(GOOS)-$(GOARCH)$(GOARM).$* -f /tmp/nfpm.yml.tmp
+	@rm /tmp/nfpm.yml.tmp
+
+.PHONY:  build-% gen fmt docker-build docker-push docker-release docker-%-all
